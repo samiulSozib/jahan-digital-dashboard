@@ -437,12 +437,12 @@ const TransactionPage = () => {
         };
 
         // Define message based on transaction type
-        const getTransactionMessage = (type: string | null) => {
-            switch (type) {
+        const getTransactionMessage = (data: MoneyTransaction) => {
+            switch (data.status) {
                 case 'credit':
-                    return 'Amount Credited To Reseller';
+                    return `Amount Credited To ${data.initiator_type}`;
                 case 'debit':
-                    return 'Amount Debited From Reseller';
+                    return `Amount Debited From ${data.initiator_type}`;
                 default:
                     return 'Unknown Transaction';
             }
@@ -452,7 +452,7 @@ const TransactionPage = () => {
             <>
                 <span className="p-column-title">Status (Type)</span>
                 <span style={{ fontSize: '0.7rem', borderRadius: '5px' }} className={`inline-block p-1 text-white ${getBackgroundColor(rowData.status)}`}>
-                    {getTransactionMessage(rowData.status)}
+                    {getTransactionMessage(rowData)}
                 </span>
             </>
         );
@@ -462,7 +462,7 @@ const TransactionPage = () => {
         // Function to capitalize the first letter
         const capitalizeFirstLetter = (text: string | null) => {
             if (!text) return ''; // Handle null or empty string
-            if (text == 'App\\Models\\User') return 'Reseller';
+            //if (text == 'App\\Models\\User') return 'Reseller';
             return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
         };
 
