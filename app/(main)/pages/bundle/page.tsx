@@ -1,37 +1,40 @@
 /* eslint-disable @next/next/no-img-element */
 'use client';
+import { _addBundle, _deleteBundle, _deleteSelectedBundles, _editBundle, _fetchBundleList, _setProvider, _unsetProvider } from '@/app/redux/actions/bundleActions';
+import { _fetchCompanies } from '@/app/redux/actions/companyActions';
+import { _fetchCurrencies } from '@/app/redux/actions/currenciesActions';
+import { _fetchProviders, fetchCategoryProducts, fetchProviderCategories } from '@/app/redux/actions/providerActions';
+import { _fetchServiceList } from '@/app/redux/actions/serviceActions';
+import { _fetchServiceCategories } from '@/app/redux/actions/serviceCategoryActions';
+import {
+    _fetchSingleProvider,
+    _fetchPaystoreOperators,
+    _fetchPaystoreProductsByFirm,
+    _fetchManshorPayServices,
+    _fetchManshorPayProducts
+} from '@/app/redux/actions/singleProviderAction';
+import { AppDispatch } from '@/app/redux/store';
+import i18n from '@/i18n';
+import { ApiBinding, Bundle, Category, Product, Provider, RawInternet, Service } from '@/types/interface';
+import { PaystoreGroup, PaystoreOperator } from '@/types/interface';
 import { Button } from 'primereact/button';
 import { Column } from 'primereact/column';
 import { DataTable } from 'primereact/datatable';
 import { Dialog } from 'primereact/dialog';
+import { Dropdown } from 'primereact/dropdown';
 import { InputText } from 'primereact/inputtext';
+import { Paginator } from 'primereact/paginator';
+import { ProgressBar } from 'primereact/progressbar';
 import { Toast } from 'primereact/toast';
 import { Toolbar } from 'primereact/toolbar';
 import { classNames } from 'primereact/utils';
 import React, { useEffect, useRef, useState } from 'react';
-import { useDispatch } from 'react-redux';
-import { _fetchCompanies, _deleteCompany, _addCompany, _editCompany } from '@/app/redux/actions/companyActions';
-import { useSelector } from 'react-redux';
-import { Dropdown } from 'primereact/dropdown';
-import { _addService, _deleteService, _editService, _fetchServiceList } from '@/app/redux/actions/serviceActions';
-import { _fetchServiceCategories } from '@/app/redux/actions/serviceCategoryActions';
-import { _addBundle, _deleteBundle, _deleteSelectedBundles, _editBundle, _fetchBundleList, _setProvider, _unsetProvider } from '@/app/redux/actions/bundleActions';
-import { Paginator } from 'primereact/paginator';
-import { _fetchCurrencies } from '@/app/redux/actions/currenciesActions';
-import { currenciesReducer } from '../../../redux/reducers/currenciesReducer';
-import { AppDispatch } from '@/app/redux/store';
-import { ApiBinding, Bundle, Category, Product, Provider, RawInternet, Service } from '@/types/interface';
-import { ProgressBar } from 'primereact/progressbar';
-import withAuth from '../../authGuard';
 import { useTranslation } from 'react-i18next';
+import { useDispatch, useSelector } from 'react-redux';
+import withAuth from '../../authGuard';
 import { customCellStyle } from '../../utilities/customRow';
-import i18n from '@/i18n';
 import { isRTL } from '../../utilities/rtlUtil';
-import { _fetchProviders } from '@/app/redux/actions/providerActions';
-import { _fetchSingleProvider } from '@/app/redux/actions/singleProviderAction';
-import { singleProviderReducer } from '../../../redux/reducers/singleProviderReducer';
-import BundleForm from '../../components/Form/BundleForm';
-import { fetchProviderCategories, fetchCategoryProducts, clearSelectedCategory } from '@/app/redux/actions/providerActions';
+import { ManageTranslationsButton } from '@/app/(main)/components/ManageTranslationsButton';
 
 const BundlePage = () => {
     let emptyBundle: Bundle = {
@@ -90,7 +93,15 @@ const BundlePage = () => {
 
     const [activeFilters, setActiveFilters] = useState({});
     const { providers } = useSelector((state: any) => state.providerReducer);
-    const { rawInternets, rawBundles } = useSelector((state: any) => state.singleProviderReducer);
+    const {
+        rawInternets,
+        rawBundles,
+        products,
+        operatorGroups,
+        totalGroups,
+        selectedOpFirm: selectedOpFirmFromRedux,
+        loading: singleProviderLoading
+    } = useSelector((state: any) => state.singleProviderReducer);
 
     const [providerSearchTag, setProviderSearchTag] = useState('');
 
@@ -104,6 +115,115 @@ const BundlePage = () => {
     const [categoryProducts, setCategoryProducts] = useState<Product[]>([]);
     const [loadingCategories, setLoadingCategories] = useState(false);
     const [loadingProducts, setLoadingProducts] = useState(false);
+
+    // Paystore operator states
+    const [selectedPaystoreGroup, setSelectedPaystoreGroup] = useState<PaystoreGroup | null>(null);
+    const [selectedPaystoreOperator, setSelectedPaystoreOperator] = useState<PaystoreOperator | null>(null);
+
+    // INAX: one API request, then all filtering is local to the frontend.
+    const [inaxResponseProducts, setInaxResponseProducts] = useState<any[]>([]);
+    const [inaxLoading, setInaxLoading] = useState(false);
+    const [selectedInaxCategory, setSelectedInaxCategory] = useState<string | null>(null);
+    const [selectedInaxOperator, setSelectedInaxOperator] = useState<string | null>(null);
+    const [selectedInaxSimType, setSelectedInaxSimType] = useState<string | null>(null);
+
+    const flattenInaxProducts = (payload: any): any[] => {
+        // Accept both original INAX data.categories[].bundles and an already
+        // flattened Redux response, without making another HTTP request.
+        const root = payload?.payload?.data || payload?.data || payload?.payload || payload;
+        const categories = root?.categories || payload?.categories;
+        if (Array.isArray(categories)) {
+            return categories.flatMap((category: any) =>
+                (Array.isArray(category.bundles) ? category.bundles : []).map((item: any) => ({
+                    ...item,
+                    category: item.category || category.code || category.name,
+                    table_id: item.table_id || item.provider_table_id,
+                    name: item.name || item.title,
+                    operator: item.operator || item.meta?.operator,
+                    sim_type: item.sim_type || item.meta?.sim_type,
+                    internet_type: item.internet_type || item.meta?.internet_type
+                }))
+            );
+        }
+        const possible = Array.isArray(root) ? root : (root?.bundles || root?.rawInternets || root?.rawBundles || root?.products || root?.data?.bundles);
+        if (!Array.isArray(possible)) return [];
+        return possible.map((item: any) => ({
+            ...item,
+            category: item.category || item.category_name || 'Other',
+            table_id: item.table_id || item.provider_table_id,
+            name: item.name || item.title,
+            operator: item.operator || item.meta?.operator,
+            sim_type: item.sim_type || item.meta?.sim_type,
+            internet_type: item.internet_type || item.meta?.internet_type
+        }));
+    };
+
+    const inaxProducts = React.useMemo(() => {
+        const primary = inaxResponseProducts.length ? inaxResponseProducts : flattenInaxProducts(rawInternets);
+        const fallback = primary.length ? primary : flattenInaxProducts(rawBundles);
+        return fallback;
+    }, [inaxResponseProducts, rawInternets, rawBundles]);
+    const inaxCategories = React.useMemo(() =>
+        Array.from(new Set(inaxProducts.map((p: any) => String(p.category || 'Other')))).sort(), [inaxProducts]);
+    const inaxCategoryProducts = React.useMemo(() => inaxProducts.filter((p: any) =>
+        !selectedInaxCategory || String(p.category || 'Other') === selectedInaxCategory), [inaxProducts, selectedInaxCategory]);
+    const inaxOperators = React.useMemo(() =>
+        Array.from(new Set(inaxCategoryProducts.map((p: any) => String(p.operator || p.meta?.operator || 'Other')))).sort(), [inaxCategoryProducts]);
+    const inaxOperatorProducts = React.useMemo(() => inaxCategoryProducts.filter((p: any) =>
+        !selectedInaxOperator || String(p.operator || p.meta?.operator || 'Other') === selectedInaxOperator), [inaxCategoryProducts, selectedInaxOperator]);
+    const inaxSimTypes = React.useMemo(() =>
+        Array.from(new Set(inaxOperatorProducts.map((p: any) => String(p.sim_type || p.meta?.sim_type || 'Other')))).sort(), [inaxOperatorProducts]);
+    const filteredInaxProducts = React.useMemo(() => inaxOperatorProducts.filter((p: any) =>
+        !selectedInaxSimType || String(p.sim_type || p.meta?.sim_type || 'Other') === selectedInaxSimType), [inaxOperatorProducts, selectedInaxSimType]);
+    const inaxProductLabel = (p: any) => `${p.title || p.name || `Product #${p.id}`} — ${p.sim_type || p.meta?.sim_type || 'SIM N/A'} — ${p.tprice ?? p.price ?? '-'} ${p.currency || 'IRT'}`;
+
+    // ManshorPay states
+    const [manshorPayServices, setManshorPayServices] = useState<any[]>([]);
+    const [selectedManshorPayService, setSelectedManshorPayService] = useState<any | null>(null);
+    const [manshorPayProducts, setManshorPayProducts] = useState<any[]>([]);
+    const [manshorPayServicesLoading, setManshorPayServicesLoading] = useState(false);
+    const [manshorPayProductsLoading, setManshorPayProductsLoading] = useState(false);
+
+    const getManshorPayServiceLabel = (service: any): string => {
+        if (!service) return '';
+
+        if (typeof service._display_name === 'string' && service._display_name) {
+            return service._display_name;
+        }
+
+        const operator =
+            service.operator && typeof service.operator === 'object'
+                ? String(service.operator?.name || '')
+                : String(service.operator || '');
+
+        const category =
+            service.category && typeof service.category === 'object'
+                ? String(service.category?.name || '')
+                : String(service.category || '');
+
+        const parts = [operator, category].filter(Boolean);
+
+        if (parts.length > 0) {
+            return parts.join(' - ');
+        }
+
+        if (typeof service.name === 'string' && service.name) {
+            return service.name;
+        }
+
+        return `Service #${String(service.id || '')}`;
+    };
+
+    const getManshorPayProductTitle = (product: any) => {
+        if (!product) return '';
+
+        return (
+            product.title ||
+            product.name ||
+            product.api_binding?.title ||
+            `Bundle #${product.id}`
+        );
+    };
 
     useEffect(() => {
         dispatch(_fetchBundleList(1, searchTag));
@@ -184,12 +304,183 @@ const BundlePage = () => {
         }
     }, [selectedCategory, selectedProvider, dispatch, t]);
 
-    // Fetch rawInternets for non-mzr providers
+    // 🔥 FIXED: WHEN PROVIDER IS PAYSTORE - FETCH OPERATORS using the correct action
     useEffect(() => {
-        if (selectedProvider && selectedCapability && selectedProvider.code !== 'mzr') {
-            dispatch(_fetchSingleProvider(selectedProvider?.id, selectedProvider?.code, selectedCapability, bundle.service?.company?.company_name ?? ""));
+        if (selectedProvider && selectedProvider.code === 'paystore') {
+            console.log('📦 Fetching operators for paystore provider:', selectedProvider.id);
+            dispatch(_fetchPaystoreOperators(selectedProvider.id));
         }
+    }, [dispatch, selectedProvider]);
+
+    // WHEN PAYSTORE GROUP IS SELECTED - FETCH PRODUCTS BY OP_FIRM
+    useEffect(() => {
+        if (selectedProvider && selectedProvider.code === 'paystore' && selectedPaystoreGroup) {
+            console.log('📦 Fetching paystore products for firm:', selectedPaystoreGroup.op_firm);
+            dispatch(_fetchPaystoreProductsByFirm(
+                selectedProvider.id,
+                selectedPaystoreGroup.op_firm
+            ));
+        }
+    }, [dispatch, selectedProvider, selectedPaystoreGroup]);
+
+    // ManshorPay - fetch services when provider is selected
+    useEffect(() => {
+        if (!selectedProvider || selectedProvider.code !== 'manshorpay') {
+            setManshorPayServices([]);
+            setSelectedManshorPayService(null);
+            setManshorPayProducts([]);
+            setManshorPayServicesLoading(false);
+            setManshorPayProductsLoading(false);
+            return;
+        }
+
+        const loadManshorPayServices = async () => {
+            setManshorPayServicesLoading(true);
+
+            try {
+                const result = await dispatch(
+                    _fetchManshorPayServices(
+                        selectedProvider.id,
+                        1,
+                        ''
+                    )
+                );
+
+                const loadedServices = result?.services || [];
+                setManshorPayServices(loadedServices);
+
+                if (selectedManshorPayService?.id) {
+                    const matchedService = loadedServices.find(
+                        (service: any) =>
+                            String(service.id) === String(selectedManshorPayService.id)
+                    );
+
+                    if (matchedService) {
+                        setSelectedManshorPayService(matchedService);
+                    }
+                }
+            } catch (error: any) {
+                console.error('Error fetching ManshorPay services:', error);
+
+                toast.current?.show({
+                    severity: 'error',
+                    summary: t('ERROR'),
+                    detail: error.response?.data?.message || 'Failed to fetch ManshorPay services',
+                    life: 3000
+                });
+            } finally {
+                setManshorPayServicesLoading(false);
+            }
+        };
+
+        loadManshorPayServices();
+    }, [dispatch, selectedProvider, t]);
+
+    // ManshorPay - fetch products for selected service
+    useEffect(() => {
+        if (
+            !selectedProvider ||
+            selectedProvider.code !== 'manshorpay' ||
+            !selectedManshorPayService?.id
+        ) {
+            setManshorPayProducts([]);
+            return;
+        }
+
+        const loadManshorPayProducts = async () => {
+            setManshorPayProductsLoading(true);
+
+            try {
+                const result = await dispatch(
+                    _fetchManshorPayProducts(
+                        selectedProvider.id,
+                        selectedManshorPayService.id,
+                        1,
+                        ''
+                    )
+                );
+
+                const loadedProducts = result?.products || [];
+                setManshorPayProducts(loadedProducts);
+
+                if (bundle.api_provider_bundle_id) {
+                    const matchedProduct = loadedProducts.find(
+                        (product: any) =>
+                            String(product.id) === String(bundle.api_provider_bundle_id)
+                    );
+
+                    if (matchedProduct) {
+                        setSelectedProviderBundle(matchedProduct);
+                    }
+                }
+            } catch (error: any) {
+                console.error('Error fetching ManshorPay products:', error);
+
+                toast.current?.show({
+                    severity: 'error',
+                    summary: t('ERROR'),
+                    detail: error.response?.data?.message || 'Failed to fetch ManshorPay products',
+                    life: 3000
+                });
+            } finally {
+                setManshorPayProductsLoading(false);
+            }
+        };
+
+        loadManshorPayProducts();
+    }, [
+        dispatch,
+        selectedProvider,
+        selectedManshorPayService,
+        bundle.api_provider_bundle_id,
+        t
+    ]);
+
+    // For other providers (non-paystore, non-mzr, non-manshorpay)
+    useEffect(() => {
+        if (!selectedProvider || ['mzr', 'paystore', 'manshorpay', 'inax'].includes(selectedProvider.code) || !selectedCapability) return;
+        dispatch(_fetchSingleProvider(selectedProvider.id, selectedProvider.code, selectedCapability, bundle.service?.company?.company_name ?? ''));
+
     }, [dispatch, selectedProvider, selectedCapability, bundle.service?.company?.company_name]);
+
+    // INAX uses existing provider Redux action only once per provider choice.
+    // Category/operator/SIM dropdowns filter its returned products in memory.
+    useEffect(() => {
+        if (selectedProvider?.code !== 'inax') return;
+        let active = true;
+        const fetchInax = async () => {
+            setInaxLoading(true);
+            try {
+                const result: any = await dispatch(_fetchSingleProvider(
+                    selectedProvider.id,
+                    selectedProvider.code,
+                    (selectedProvider.capabilities && selectedProvider.capabilities[0]) || 'internet',
+                    ''
+                ));
+                if (!active) return;
+                const items = flattenInaxProducts(result);
+                if (items.length) setInaxResponseProducts(items);
+            } catch (error) {
+                console.error('INAX products fetch failed:', error);
+            } finally {
+                if (active) setInaxLoading(false);
+            }
+        };
+        fetchInax();
+        return () => { active = false; };
+    }, [dispatch, selectedProvider?.id, selectedProvider?.code]);
+
+    // Debug effect
+    useEffect(() => {
+        console.log('📊 Products in Redux:', products);
+        console.log('📊 Products length:', products?.length);
+        console.log('📊 Raw Internets in Redux:', rawInternets);
+        console.log('📊 Operator Groups:', operatorGroups);
+        console.log('📊 Total Groups:', totalGroups);
+        console.log('🔍 Selected Provider:', selectedProvider?.code);
+        console.log('🔍 Selected Capability:', selectedCapability);
+        console.log('🔍 Selected Paystore Group:', selectedPaystoreGroup?.op_firm);
+    }, [products, rawInternets, selectedProvider, selectedCapability, operatorGroups, selectedPaystoreGroup, totalGroups]);
 
     useEffect(() => {
         if (Object.keys(activeFilters).length > 0) {
@@ -207,6 +498,15 @@ const BundlePage = () => {
         setSelectedCategory(null);
         setCategories([]);
         setCategoryProducts([]);
+        setSelectedPaystoreGroup(null);
+        setSelectedPaystoreOperator(null);
+        setManshorPayServices([]);
+        setSelectedManshorPayService(null);
+        setManshorPayProducts([]);
+        setInaxResponseProducts([]);
+        setSelectedInaxCategory(null);
+        setSelectedInaxOperator(null);
+        setSelectedInaxSimType(null);
     };
 
     const hideDialog = () => {
@@ -219,6 +519,15 @@ const BundlePage = () => {
         setSelectedCategory(null);
         setCategories([]);
         setCategoryProducts([]);
+        setSelectedPaystoreGroup(null);
+        setSelectedPaystoreOperator(null);
+        setManshorPayServices([]);
+        setSelectedManshorPayService(null);
+        setManshorPayProducts([]);
+        setInaxResponseProducts([]);
+        setSelectedInaxCategory(null);
+        setSelectedInaxOperator(null);
+        setSelectedInaxSimType(null);
     };
 
     const hideDeleteServiceDialog = () => {
@@ -256,135 +565,381 @@ const BundlePage = () => {
     };
 
     const saveService = () => {
-        setSubmitted(true);
-        if (!bundle.bundle_title || !bundle.bundle_description || !bundle.admin_buying_price || !bundle.buying_price || !bundle.selling_price || !bundle.validity_type || !bundle.service || !bundle.currency) {
-            toast.current?.show({
-                severity: 'error',
-                summary: t('VALIDATION_ERROR'),
-                detail: t('PLEASE_FILLED_ALL_REQUIRED_FIELDS'),
-                life: 3000
-            });
-            return;
-        }
+    setSubmitted(true);
+    if (!bundle.bundle_title || !bundle.bundle_description || !bundle.admin_buying_price || !bundle.buying_price || !bundle.selling_price || !bundle.validity_type || !bundle.service || !bundle.currency) {
+        toast.current?.show({
+            severity: 'error',
+            summary: t('VALIDATION_ERROR'),
+            detail: t('PLEASE_FILLED_ALL_REQUIRED_FIELDS'),
+            life: 3000
+        });
+        return;
+    }
 
-        // For mzr provider, use selectedCategory and categoryProducts
-        if (selectedProvider && selectedProvider.code === 'mzr' && selectedCategory && selectedProviderBundle) {
-            const providerData = {
-                api_provider_id: selectedProvider.id,
-                api_provider_bundle_id: selectedProviderBundle.id,
-                api_binding: {
-                    // product_type: selectedCategory.purchase_type,
-                    // category_id: selectedCategory.id,
-                    // category_name: selectedCategory.name,
-                    // product_id: selectedProviderBundle.id,
-                    // product_name: selectedProviderBundle.name,
-                    // price: selectedProviderBundle.price,
-                    // stock: selectedProviderBundle.stock,
-                    // description: selectedProviderBundle.description,
+    if (
+        selectedProvider &&
+        selectedProvider.code === 'manshorpay' &&
+        (!selectedManshorPayService || !selectedProviderBundle)
+    ) {
+        toast.current?.show({
+            severity: 'warn',
+            summary: t('VALIDATION_WARNING'),
+            detail: 'Please select a ManshorPay service and product before saving.',
+            life: 3000
+        });
+        return;
+    }
 
-                    product_type: selectedCategory.purchase_type,
-                    operator: selectedProviderBundle.operator,
-                    internet_type: selectedProviderBundle.internet_type,
-                    sim_type: selectedProviderBundle.sim_type,
-                    product_id: selectedProviderBundle.id,
-                    table_id: selectedProviderBundle.table_id,
-                    name: selectedProviderBundle.name,
-                    days: selectedProviderBundle.days,
-                    volume: selectedProviderBundle.volume,
-                    unit: selectedProviderBundle.unit,
-                    periodicity: selectedProviderBundle.periodicity
-                }
-            };
+    if (selectedProvider?.code === 'inax' && !selectedProviderBundle) {
+        toast.current?.show({ severity: 'warn', summary: t('VALIDATION_WARNING'), detail: 'Please select an INAX product before saving.', life: 3000 });
+        return;
+    }
 
-            console.log(providerData)
-
-            if (bundle.id && bundle.id !== 0) {
-                dispatch(_editBundle(bundle.id, bundle, toast, t))
-                    .then((newBundle) => {
-                        if (newBundle) {
-                            console.log(providerData)
-                            dispatch(_setProvider(newBundle.id, providerData, toast, t));
-                        }
-                    })
-                    .catch((err) => {
-                        console.error('Edit bundle failed:', err);
-                    });
-            } else {
-                dispatch(_addBundle(bundle, toast, t))
-                    .then((newBundle) => {
-                        if (newBundle) {
-                            console.log(providerData)
-                            dispatch(_setProvider(newBundle.id, providerData, toast, t));
-                        }
-                    })
-                    .catch((err) => {
-                        console.error('Add bundle failed:', err);
-                    });
+    // For mzr provider
+    if (selectedProvider && selectedProvider.code === 'mzr' && selectedCategory && selectedProviderBundle) {
+        const providerData = {
+            api_provider_id: selectedProvider.id,
+            api_provider_bundle_id: selectedProviderBundle.id,
+            api_binding: {
+                product_type: selectedCategory.purchase_type,
+                category_id: selectedCategory.id,
+                category_name: selectedCategory.name,
+                product_id: selectedProviderBundle.id,
+                product_name: selectedProviderBundle.name,
+                price: selectedProviderBundle.price,
+                stock: selectedProviderBundle.stock,
+                description: selectedProviderBundle.description,
+                operator: selectedProviderBundle.operator,
+                internet_type: selectedProviderBundle.internet_type,
+                sim_type: selectedProviderBundle.sim_type,
+                table_id: selectedProviderBundle.table_id,
+                name: selectedProviderBundle.name,
+                days: selectedProviderBundle.days,
+                volume: selectedProviderBundle.volume,
+                unit: selectedProviderBundle.unit,
+                periodicity: selectedProviderBundle.periodicity
             }
-        }
-        // For non-mzr providers
-        else if (selectedProvider && selectedProviderBundle && selectedProvider.code !== 'mzr') {
-            const providerData = {
-                api_provider_id: selectedProvider.id,
-                api_provider_bundle_id: selectedProviderBundle.id,
+        };
 
-                api_binding: {
-                    product_type: selectedProviderBundle.product_type,
-                    operator: selectedProviderBundle.operator,
-                    internet_type: selectedProviderBundle.internet_type,
-                    sim_type: selectedProviderBundle.sim_type,
-                    product_id: selectedProviderBundle.id,
-                    table_id: selectedProviderBundle.table_id,
-                    name: selectedProviderBundle.name,
-                    days: selectedProviderBundle.days,
-                    volume: selectedProviderBundle.volume,
-                    unit: selectedProviderBundle.unit,
-                    periodicity: selectedProviderBundle.periodicity
-                }
-            };
+        console.log('Provider Data (MZR):', providerData);
 
-            console.log(providerData)
-
-            if (bundle.id && bundle.id !== 0) {
-                dispatch(_editBundle(bundle.id, bundle, toast, t))
-                    .then((newBundle) => {
-                        if (newBundle) {
-                            console.log(providerData)
-                            dispatch(_setProvider(newBundle.id, providerData, toast, t));
-                        }
-                    })
-                    .catch((err) => {
-                        console.error('Edit bundle failed:', err);
-                    });
-            } else {
-                dispatch(_addBundle(bundle, toast, t))
-                    .then((newBundle) => {
-                        if (newBundle) {
-                            console.log(providerData)
-                            dispatch(_setProvider(newBundle.id, providerData, toast, t));
-                        }
-                    })
-                    .catch((err) => {
-                        console.error('Add bundle failed:', err);
-                    });
+        if (bundle.id && bundle.id !== 0) {
+            if (selectedProvider) {
+                bundle.api_provider_id = selectedProvider.id;
             }
+            dispatch(_editBundle(bundle.id, bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Edit bundle failed:', err);
+                });
         } else {
-            // Save without provider binding
-            if (bundle.id && bundle.id !== 0) {
-                dispatch(_editBundle(bundle.id, bundle, toast, t));
-            } else {
-                dispatch(_addBundle(bundle, toast, t));
+            if (selectedProvider) {
+                bundle.api_provider_id = selectedProvider.id;
             }
+            dispatch(_addBundle(bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Add bundle failed:', err);
+                });
         }
+    }
+    // For paystore with products
+    else if (selectedProvider && selectedProvider.code === 'paystore' && selectedProviderBundle) {
+        // Get the product data from the selected bundle
+        const product = selectedProviderBundle as any;
 
-        setServiceDialog(false);
-        setBundle(emptyBundle);
-        setSubmitted(false);
-        hideDialog();
-    };
+        // Extract data from product
+        const productId = product.id || product.product_id || product.ProductId;
+        const operator = product.operator || product.Operator || '';
+        const operatorRaw = product.operator_raw || product.Operator || '';
+        const opFirm = selectedPaystoreGroup?.op_firm || product.op_firm || product.OpFirm || selectedOpFirmFromRedux || '';
+        const opFirmRaw = opFirm;
+        const type = product.type || product.Type || '';
+        const amount = product.amount || product.Amount || '';
+        const packageName = product.title || product.name || product.package_name || product.PackageName || '';
+        const price = product.price || product.Price || '';
+        const recomPrice = product.recommended_price || product.RecomPrice || '';
+
+        // Extract packet privacy data
+        const packetPrivacy = product.packet_privacy || product.PacketPrivacy || product.raw?.PacketPrivacy || {};
+        const usableDays = packetPrivacy.UsableDays || product.validity_days || 0;
+        const minAbroad = packetPrivacy.MinAbroad || '0.00';
+        const minAllDirection = packetPrivacy.MinAllDirection || '0.00';
+        const minInNetwork = packetPrivacy.MinInNetwork || '0.00';
+        const sms = packetPrivacy.Sms || '0.00';
+        const internetMb = packetPrivacy.InternetMb || '0';
+        const isSocial = packetPrivacy.isSocial || 0;
+        const officialSalePrice = packetPrivacy.officialSalePrice || '0.00';
+
+        const providerData = {
+            api_provider_id: selectedProvider.id,
+            api_provider_bundle_id: String(productId),
+            api_binding: {
+                product_id: productId,
+                operator: operator,
+                operator_raw: operatorRaw,
+                op_firm: opFirm,
+                op_firm_raw: opFirmRaw,
+                type: type,
+                amount: amount,
+                package_name: packageName,
+                price: String(price),
+                recom_price: String(recomPrice),
+                packet_privacy: {
+                    UsableDays: usableDays,
+                    MinAbroad: minAbroad,
+                    MinAllDirection: minAllDirection,
+                    MinInNetwork: minInNetwork,
+                    Sms: sms,
+                    InternetMb: String(internetMb),
+                    isSocial: isSocial,
+                    officialSalePrice: officialSalePrice
+                }
+            }
+        };
+
+        console.log('Provider Data (Paystore Product):', providerData);
+
+        if (bundle.id && bundle.id !== 0) {
+            if (selectedProvider) {
+                bundle.api_provider_id = selectedProvider.id;
+            }
+            dispatch(_editBundle(bundle.id, bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Edit bundle failed:', err);
+                });
+        } else {
+            if (selectedProvider) {
+                bundle.api_provider_id = selectedProvider.id;
+            }
+            dispatch(_addBundle(bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Add bundle failed:', err);
+                });
+        }
+    }
+    // For ManshorPay provider
+    else if (
+        selectedProvider &&
+        selectedProvider.code === 'manshorpay' &&
+        selectedManshorPayService &&
+        selectedProviderBundle
+    ) {
+        const product: any = selectedProviderBundle;
+
+        const productId =
+            product.id ||
+            product.provider_table_id ||
+            product.api_binding?.bundle_id;
+
+        const existingApiBinding =
+            product.api_binding && typeof product.api_binding === 'object'
+                ? product.api_binding
+                : {};
+
+        const operatorValue =
+            typeof product.operator === 'object'
+                ? product.operator?.name
+                : product.operator;
+
+        const categoryValue =
+            typeof product.category === 'object'
+                ? product.category?.name
+                : product.category;
+
+        const title =
+            product.title ||
+            product.name ||
+            existingApiBinding.title ||
+            existingApiBinding.name ||
+            '';
+
+        const providerData = {
+            api_provider_id: selectedProvider.id,
+            api_provider_bundle_id: String(productId),
+            api_binding: {
+                ...existingApiBinding,
+                provider: 'manshorpay',
+                service_id: selectedManshorPayService.id,
+                service_name: getManshorPayServiceLabel(selectedManshorPayService),
+                bundle_id: String(productId),
+                product_id: String(productId),
+                name: title,
+                title: title,
+                operator: operatorValue || existingApiBinding.operator || '',
+                category: categoryValue || existingApiBinding.category || '',
+                type: product.type || existingApiBinding.type || '',
+                validity: product.validity || existingApiBinding.validity || '',
+                provider_price:
+                    product.price ??
+                    existingApiBinding.provider_price ??
+                    null,
+                provider_currency:
+                    product.currency ||
+                    existingApiBinding.provider_currency ||
+                    null
+            }
+        };
+
+        console.log('Provider Data (ManshorPay):', providerData);
+
+        if (bundle.id && bundle.id !== 0) {
+            bundle.api_provider_id = selectedProvider.id;
+
+            dispatch(_editBundle(bundle.id, bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Edit ManshorPay bundle failed:', err);
+                });
+        } else {
+            bundle.api_provider_id = selectedProvider.id;
+
+            dispatch(_addBundle(bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Add ManshorPay bundle failed:', err);
+                });
+        }
+    }
+    // INAX: retain both product ID and unique provider table ID.
+    else if (selectedProvider?.code === 'inax' && selectedProviderBundle) {
+        const product: any = selectedProviderBundle;
+        const providerData = {
+            api_provider_id: selectedProvider.id,
+            api_provider_bundle_id: String(product.id),
+            api_binding: {
+                product_id: product.id,
+                table_id: product.table_id || product.provider_table_id,
+                provider_table_id: product.table_id || product.provider_table_id,
+                category: product.category,
+                name: product.name || product.title,
+                title: product.title || product.name,
+                operator: product.operator || product.meta?.operator,
+                sim_type: product.sim_type || product.meta?.sim_type,
+                internet_type: product.internet_type || product.meta?.internet_type,
+                validity: product.validity,
+                days: product.meta?.days ?? product.days,
+                volume: product.meta?.volume ?? product.volume,
+                unit: product.meta?.unit ?? product.unit,
+                type_label: product.meta?.type_label,
+                price: product.price,
+                tprice: product.tprice,
+                currency: product.currency,
+                amount_rial: product.meta?.amount_rial,
+                gross_price_rial: product.meta?.gross_price_rial
+            }
+        };
+        const saveBinding = (newBundle: any) => {
+            if (newBundle?.id) dispatch(_setProvider(newBundle.id, providerData, toast, t));
+        };
+        bundle.api_provider_id = selectedProvider.id;
+        if (bundle.id && bundle.id !== 0) {
+            dispatch(_editBundle(bundle.id, bundle, toast, t)).then(saveBinding);
+        } else {
+            dispatch(_addBundle(bundle, toast, t)).then(saveBinding);
+        }
+    }
+    // For non-mzr, non-paystore, non-manshorpay providers (regular bundles)
+    else if (
+        selectedProvider &&
+        selectedProviderBundle &&
+        selectedProvider.code !== 'mzr' &&
+        selectedProvider.code !== 'paystore' &&
+        selectedProvider.code !== 'manshorpay'
+    ) {
+        const providerData = {
+            api_provider_id: selectedProvider.id,
+            api_provider_bundle_id: selectedProviderBundle.id,
+            api_binding: {
+                product_type: selectedProviderBundle.product_type,
+                operator: selectedProviderBundle.operator,
+                internet_type: selectedProviderBundle.internet_type,
+                sim_type: selectedProviderBundle.sim_type,
+                product_id: selectedProviderBundle.id,
+                table_id: selectedProviderBundle.table_id,
+                name: selectedProviderBundle.name,
+                days: selectedProviderBundle.days,
+                volume: selectedProviderBundle.volume,
+                unit: selectedProviderBundle.unit,
+                periodicity: selectedProviderBundle.periodicity
+            }
+        };
+
+        console.log('Provider Data (Regular):', providerData);
+
+        if (bundle.id && bundle.id !== 0) {
+            if (selectedProvider) {
+                bundle.api_provider_id = selectedProvider.id;
+            }
+            dispatch(_editBundle(bundle.id, bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Edit bundle failed:', err);
+                });
+        } else {
+            if (selectedProvider) {
+                bundle.api_provider_id = selectedProvider.id;
+            }
+            dispatch(_addBundle(bundle, toast, t))
+                .then((newBundle) => {
+                    if (newBundle) {
+                        dispatch(_setProvider(newBundle.id, providerData, toast, t));
+                    }
+                })
+                .catch((err) => {
+                    console.error('Add bundle failed:', err);
+                });
+        }
+    } else {
+        if (selectedProvider) {
+            bundle.api_provider_id = selectedProvider.id;
+        }
+        // Save without provider binding
+        if (bundle.id && bundle.id !== 0) {
+            dispatch(_editBundle(bundle.id, bundle, toast, t));
+        } else {
+            dispatch(_addBundle(bundle, toast, t));
+        }
+    }
+
+    setServiceDialog(false);
+    setBundle(emptyBundle);
+    setSubmitted(false);
+    hideDialog();
+};
 
     const editService = (bundle: Bundle) => {
-        console.log(bundle);
+        console.log('Editing bundle:', bundle);
 
         let parsedApiBinding: any = null;
         if (bundle.api_binding) {
@@ -407,15 +962,100 @@ const BundlePage = () => {
 
                 // Check if provider is mzr
                 if (provider.code === 'mzr' && parsedApiBinding.category_id) {
-                    // For mzr provider, set category and product
                     setSelectedCategory({ id: parsedApiBinding.category_id, name: parsedApiBinding.category_name } as Category);
                     setSelectedProviderBundle({ id: parsedApiBinding.product_id, name: parsedApiBinding.product_name, price: parsedApiBinding.price } as RawInternet);
-                } else {
-                    // For non-mzr providers
-                    const capability = provider.capabilities.find((cap: any) =>
+                }
+                // Check if provider is paystore with products
+                else if (provider.code === 'paystore' && (parsedApiBinding.product_type === 'product' || parsedApiBinding.type)) {
+                    // Find the product in the products list
+                    const product = products.find((p: any) =>
+                        String(p.id) === String(parsedApiBinding.product_id) ||
+                        String(p.product_id) === String(parsedApiBinding.product_id)
+                    );
+                    if (product) {
+                        setSelectedProviderBundle(product);
+                    } else {
+                        setSelectedProviderBundle(parsedApiBinding);
+                    }
+                    // Set the op_firm if available
+                    if (parsedApiBinding.op_firm) {
+                        const group = operatorGroups.find((g: PaystoreGroup) => g.op_firm === parsedApiBinding.op_firm);
+                        if (group) {
+                            setSelectedPaystoreGroup(group);
+                        }
+                    }
+                }
+                else if (provider.code === 'manshorpay') {
+                    setSelectedCapability('');
+
+                    if (parsedApiBinding.service_id) {
+                        setSelectedManshorPayService({
+                            id: Number(parsedApiBinding.service_id),
+                            name:
+                                parsedApiBinding.service_name ||
+                                `Service #${parsedApiBinding.service_id}`,
+                            operator: parsedApiBinding.operator,
+                            category: parsedApiBinding.category
+                        });
+                    }
+
+                    const manshorBundleId =
+                        parsedApiBinding.bundle_id ||
+                        parsedApiBinding.product_id ||
+                        bundle.api_provider_bundle_id;
+
+                    setSelectedProviderBundle({
+                        id: manshorBundleId,
+                        provider_table_id: String(manshorBundleId || ''),
+                        title:
+                            parsedApiBinding.title ||
+                            parsedApiBinding.name ||
+                            '',
+                        name:
+                            parsedApiBinding.title ||
+                            parsedApiBinding.name ||
+                            '',
+                        operator: parsedApiBinding.operator || '',
+                        category: parsedApiBinding.category || '',
+                        type:
+                            parsedApiBinding.type ||
+                            parsedApiBinding.product_type ||
+                            '',
+                        validity:
+                            parsedApiBinding.validity ||
+                            parsedApiBinding.periodicity ||
+                            '',
+                        price:
+                            parsedApiBinding.provider_price ??
+                            parsedApiBinding.price ??
+                            null,
+                        currency:
+                            parsedApiBinding.provider_currency ||
+                            '',
+                        api_binding: parsedApiBinding
+                    } as any);
+                }
+                else if (provider.code === 'inax') {
+                    setSelectedInaxCategory(parsedApiBinding.category || null);
+                    setSelectedInaxOperator(parsedApiBinding.operator || null);
+                    setSelectedInaxSimType(parsedApiBinding.sim_type || null);
+                    setSelectedProviderBundle({
+                        ...parsedApiBinding,
+                        id: parsedApiBinding.product_id || bundle.api_provider_bundle_id,
+                        table_id: parsedApiBinding.table_id || parsedApiBinding.provider_table_id,
+                        title: parsedApiBinding.title || parsedApiBinding.name
+                    } as any);
+                }
+                else if (
+                    provider.code !== 'mzr' &&
+                    provider.code !== 'paystore' &&
+                    provider.code !== 'manshorpay'
+                ) {
+                    // For non-mzr, non-paystore, non-manshorpay providers
+                    const capability = provider.capabilities?.find((cap: any) =>
                         cap.toLowerCase().includes(parsedApiBinding.internet_type) ||
                         cap.toLowerCase().includes(parsedApiBinding.sim_type)
-                    ) || provider.capabilities[0];
+                    ) || provider.capabilities?.[0];
 
                     setSelectedCapability(capability);
 
@@ -522,6 +1162,11 @@ const BundlePage = () => {
             setSelectedCategory(null);
             setCategories([]);
             setCategoryProducts([]);
+            setSelectedPaystoreGroup(null);
+            setSelectedPaystoreOperator(null);
+            setManshorPayServices([]);
+            setSelectedManshorPayService(null);
+            setManshorPayProducts([]);
         }
     };
 
@@ -650,19 +1295,57 @@ const BundlePage = () => {
                         className={['ar', 'fa', 'ps', 'bn'].includes(i18n.language) ? 'ml-2' : 'mr-2'}
                         onClick={openNew}
                     />
+                    <ManageTranslationsButton type="bundle" />
                 </div>
             </React.Fragment>
         );
     };
 
+    const [localSearchTerm, setLocalSearchTerm] = useState('');
+
     const leftToolbarTemplate = () => {
+
+        const handleSearch = () => {
+            setSearchTag(localSearchTerm);
+        };
+
+        const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+            if (e.key === 'Enter') {
+                handleSearch();
+            }
+        };
+
         return (
-            <div className="flex items-center">
-                <span className="block mt-2 md:mt-0 p-input-icon-left w-full md:w-auto">
-                    <i className="pi pi-search" />
-                    <InputText type="search" onInput={(e) => setSearchTag(e.currentTarget.value)} placeholder={t('ECOMMERCE.COMMON.SEARCH')} className="w-full md:w-auto" />
-                </span>
-            </div>
+            <React.Fragment>
+                <div className="flex align-items-center gap-2">
+                    <span className="p-input-icon-left">
+                        <i className="pi pi-search" />
+                        <InputText
+                            type="search"
+                            value={localSearchTerm}
+                            onChange={(e) => setLocalSearchTerm(e.target.value)}
+                            onKeyPress={handleKeyPress}
+                            placeholder={t('ECOMMERCE.COMMON.SEARCH')}
+                        />
+                    </span>
+                    <Button
+                        label={t('SEARCH')}
+                        onClick={handleSearch}
+                        className="p-button-sm"
+                    />
+                    {localSearchTerm && (
+                        <Button
+                            icon="pi pi-times"
+                            onClick={() => {
+                                setLocalSearchTerm('');
+                                setSearchTag('');
+                            }}
+                            className="p-button-sm p-button-secondary p-button-text"
+
+                        />
+                    )}
+                </div>
+            </React.Fragment>
         );
     };
 
@@ -761,28 +1444,78 @@ const BundlePage = () => {
     };
 
     const providerInfoBodyTemplate = (rowData: Bundle) => {
-        let bindingName = "";
+        let bindingName = '';
+        let providerBundleId: string | number | null =
+            rowData.api_provider_bundle_id || null;
 
         try {
-            let parsed: ApiBinding;
+            let parsed: ApiBinding | null = null;
 
-            if (typeof rowData.api_binding === "string") {
+            if (typeof rowData.api_binding === 'string') {
                 parsed = JSON.parse(rowData.api_binding) as ApiBinding;
             } else {
                 parsed = rowData.api_binding as ApiBinding;
             }
 
-            bindingName = parsed?.name || parsed?.product_name || "N/A";
+            bindingName =
+                parsed?.title ||
+                parsed?.name ||
+                parsed?.product_name ||
+                parsed?.package_name ||
+                '';
+
+            if (!providerBundleId) {
+                providerBundleId =
+                    parsed?.bundle_id ||
+                    parsed?.product_id ||
+                    null;
+            }
         } catch (e) {
-            console.error("Invalid api_binding:", e);
+            console.error('Invalid api_binding:', e);
+        }
+
+        if (!rowData.api_provider_id) {
+            return (
+                <>
+                    <span className="p-column-title">Provider</span>
+                    <span style={{ fontSize: '0.8rem', color: '#999' }}>
+                        N/A
+                    </span>
+                </>
+            );
         }
 
         return (
             <>
                 <span className="p-column-title">Provider</span>
-                <span style={{ fontSize: "0.8rem", color: "#666" }}>
-                    {bindingName}
-                </span>
+                <div
+                    style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '2px'
+                    }}
+                >
+                    <span
+                        style={{
+                            fontSize: '0.8rem',
+                            color: '#444',
+                            fontWeight: 600
+                        }}
+                    >
+                        {bindingName || 'Bound'}
+                    </span>
+
+                    {providerBundleId && (
+                        <span
+                            style={{
+                                fontSize: '0.7rem',
+                                color: '#888'
+                            }}
+                        >
+                            #{providerBundleId}
+                        </span>
+                    )}
+                </div>
             </>
         );
     };
@@ -863,8 +1596,84 @@ const BundlePage = () => {
         }
     }, [bundle.service_id, services]);
 
+    // Check if provider is paystore
+    const isPaystore = selectedProvider?.code === 'paystore';
+
     return (
         <div className="grid crud-demo -m-5">
+            <style>{`
+                /* ManshorPay dropdown overlay fixes, especially for RTL languages */
+                .manshorpay-dropdown-panel {
+                    max-width: calc(100vw - 24px) !important;
+                    border-radius: 10px !important;
+                    overflow: hidden !important;
+                }
+
+                .manshorpay-dropdown-panel .p-dropdown-items-wrapper {
+                    max-height: 320px !important;
+                }
+
+                .manshorpay-dropdown-panel .p-dropdown-item {
+                    white-space: normal !important;
+                    overflow: visible !important;
+                    line-height: 1.35 !important;
+                }
+
+                .manshorpay-dropdown-panel-rtl {
+                    direction: rtl !important;
+                    text-align: right !important;
+                }
+
+                .manshorpay-dropdown-panel-rtl .p-dropdown-header {
+                    direction: rtl !important;
+                    padding: 0.75rem !important;
+                }
+
+                .manshorpay-dropdown-panel-rtl .p-dropdown-filter-container {
+                    width: 100% !important;
+                    position: relative !important;
+                    direction: ltr !important;
+                }
+
+                .manshorpay-dropdown-panel-rtl .p-dropdown-filter {
+                    width: 100% !important;
+                    box-sizing: border-box !important;
+                    direction: rtl !important;
+                    text-align: right !important;
+                    padding-right: 2.75rem !important;
+                    padding-left: 2.75rem !important;
+                }
+
+                /* Search icon goes to the left in RTL so it never overlaps typed text */
+                .manshorpay-dropdown-panel-rtl .p-dropdown-filter-icon {
+                    left: 0.9rem !important;
+                    right: auto !important;
+                    margin-top: -0.5rem !important;
+                }
+
+                /* Clear icon stays on the right with its own reserved space */
+                .manshorpay-dropdown-panel-rtl .p-dropdown-filter-clear-icon,
+                .manshorpay-dropdown-panel-rtl .p-dropdown-clear-icon {
+                    right: 0.9rem !important;
+                    left: auto !important;
+                }
+
+                .manshorpay-dropdown-panel-rtl .p-dropdown-items {
+                    direction: rtl !important;
+                    text-align: right !important;
+                }
+
+                @media (max-width: 768px) {
+                    .manshorpay-dropdown-panel {
+                        width: calc(100vw - 24px) !important;
+                        max-width: calc(100vw - 24px) !important;
+                    }
+
+                    .manshorpay-dropdown-panel .p-dropdown-item {
+                        padding: 0.7rem !important;
+                    }
+                }
+            `}</style>
             <div className="col-12">
                 <div className="card p-2">
                     {loading && <ProgressBar mode="indeterminate" style={{ height: '6px' }} />}
@@ -923,7 +1732,6 @@ const BundlePage = () => {
                         className="p-fluid"
                         footer={companyDialogFooter}
                         onHide={hideDialog}
-
                         breakpoints={{ '960px': '95vw', '640px': '95vw' }}
                     >
                         <div className="card" style={{ padding: '20px' }}>
@@ -1219,6 +2027,16 @@ const BundlePage = () => {
                                         options={providers}
                                         onChange={(e) => {
                                             setSelectedProvider(e.value);
+                                            setSelectedCapability('');
+                                            setSelectedProviderBundle(null);
+                                            setSelectedPaystoreGroup(null);
+                                            setSelectedPaystoreOperator(null);
+                                            setSelectedManshorPayService(null);
+                                            setManshorPayProducts([]);
+                                            setInaxResponseProducts([]);
+                                            setSelectedInaxCategory(null);
+                                            setSelectedInaxOperator(null);
+                                            setSelectedInaxSimType(null);
                                         }}
                                         optionLabel="name"
                                         filter
@@ -1235,8 +2053,12 @@ const BundlePage = () => {
                                 </div>
                             </div>
 
-                            {/* Dynamic Provider Fields - Capabilities or Categories */}
-                            {selectedProvider && selectedProvider.code !== 'mzr' && (
+                            {/* Capabilities - Only show for regular providers */}
+                            {selectedProvider &&
+                                selectedProvider.code !== 'mzr' &&
+                                selectedProvider.code !== 'paystore' &&
+                                selectedProvider.code !== 'manshorpay' &&
+                                selectedProvider.code !== 'inax' && (
                                 <div className="grid formgrid p-fluid">
                                     <div className="field col-12">
                                         <label htmlFor="capabilities" style={{ fontWeight: 'bold', marginBottom: '8px', display: 'block' }}>
@@ -1245,9 +2067,10 @@ const BundlePage = () => {
                                         <Dropdown
                                             id="capabilities"
                                             value={selectedCapability}
-                                            options={selectedProvider?.capabilities}
+                                            options={selectedProvider?.capabilities || []}
                                             onChange={(e) => {
                                                 setSelectedCapability(e.value);
+                                                setSelectedProviderBundle(null);
                                             }}
                                             placeholder={t('SEARCH_CAPABILITIES')}
                                             className=""
@@ -1257,6 +2080,7 @@ const BundlePage = () => {
                                 </div>
                             )}
 
+                            {/* MZR Provider Section */}
                             {selectedProvider && selectedProvider.code === 'mzr' && (
                                 <>
                                     <div className="grid formgrid p-fluid">
@@ -1280,7 +2104,6 @@ const BundlePage = () => {
                                                 placeholder={t('SELECT_CATEGORY')}
                                                 className=""
                                                 panelClassName=""
-                                                // loading={loadingCategories}
                                                 itemTemplate={(option) => (
                                                     <div className="flex flex-col p-2 gap-1">
                                                         <div className="font-semibold">{option.name}</div>
@@ -1314,7 +2137,6 @@ const BundlePage = () => {
                                                     placeholder={t('SELECT_PRODUCT')}
                                                     className=""
                                                     panelClassName=""
-                                                    // loading={loadingProducts}
                                                     itemTemplate={(option) => (
                                                         <div className="flex flex-col p-2 gap-2">
                                                             <div className="font-semibold text-sm">{option.name}</div>
@@ -1332,7 +2154,6 @@ const BundlePage = () => {
                                                             <div className="flex flex-col">
                                                                 <span className="font-semibold text-sm">{option.name}</span>
                                                                 <span className="text-xs text-gray-600">Price: {option.price}</span>
-
                                                             </div>
                                                         );
                                                     }}
@@ -1343,7 +2164,614 @@ const BundlePage = () => {
                                 </>
                             )}
 
-                            {selectedProvider && selectedProvider.code !== 'mzr' && selectedCapability && (
+                            {/* MANSHOR PAY SECTION */}
+                            {selectedProvider && selectedProvider.code === 'manshorpay' && (
+                                <div
+                                    className="grid formgrid p-fluid"
+                                    style={{
+                                        margin: '0 0 1rem 0',
+                                        padding: '18px',
+                                        borderRadius: '14px',
+                                        border: '1px solid #dbeafe',
+                                        background: 'linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%)'
+                                    }}
+                                >
+                                    <div className="col-12 mb-3">
+                                        <div
+                                            className="flex flex-column md:flex-row md:align-items-center md:justify-content-between gap-2"
+                                            style={{
+                                                borderBottom: '1px solid #dbeafe',
+                                                paddingBottom: '12px'
+                                            }}
+                                        >
+                                            <div>
+                                                <div
+                                                    style={{
+                                                        fontSize: '1.05rem',
+                                                        fontWeight: 700,
+                                                        color: '#1e3a8a'
+                                                    }}
+                                                >
+                                                    ManshorPay API Binding
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        marginTop: '4px',
+                                                        fontSize: '0.8rem',
+                                                        color: '#64748b'
+                                                    }}
+                                                >
+                                                    Select the ManshorPay service first, then choose the provider product to bind with this local bundle.
+                                                </div>
+                                            </div>
+
+                                            <div
+                                                style={{
+                                                    fontSize: '0.75rem',
+                                                    color: '#475569',
+                                                    background: '#ffffff',
+                                                    border: '1px solid #dbeafe',
+                                                    borderRadius: '999px',
+                                                    padding: '6px 10px',
+                                                    whiteSpace: 'nowrap'
+                                                }}
+                                            >
+                                                Provider: <strong>ManshorPay</strong>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="field col-12 md:col-6">
+                                        <label
+                                            htmlFor="manshor_service"
+                                            style={{
+                                                fontWeight: 'bold',
+                                                marginBottom: '8px',
+                                                display: 'block'
+                                            }}
+                                        >
+                                            ManshorPay Service <span className="text-red-500">*</span>
+                                        </label>
+
+                                        <Dropdown
+                                            id="manshor_service"
+                                            value={selectedManshorPayService}
+                                            options={manshorPayServices}
+                                            optionLabel="_display_name"
+                                            dataKey="id"
+                                            onChange={(e) => {
+                                                setSelectedManshorPayService(e.value);
+                                                setSelectedProviderBundle(null);
+                                                setManshorPayProducts([]);
+                                            }}
+                                            disabled={manshorPayServicesLoading}
+                                            filter
+                                            filterBy="_display_name,_operator_name,_category_name"
+                                            filterPlaceholder="Search service"
+                                            showFilterClear
+                                            placeholder="Select ManshorPay service"
+                                            className="w-full"
+                                            panelClassName={isRTL() ? 'manshorpay-dropdown-panel manshorpay-dropdown-panel-rtl' : 'manshorpay-dropdown-panel'}
+                                            scrollHeight="320px"
+                                            emptyMessage="No ManshorPay services found"
+                                            itemTemplate={(option: any) => (
+                                                <div className="flex flex-column gap-1 p-2">
+                                                    <div className="font-semibold">
+                                                        {getManshorPayServiceLabel(option)}
+                                                    </div>
+
+                                                    <div className="flex flex-wrap gap-2 text-xs">
+                                                        {(option.bundles_count !== undefined || option.bundle_count !== undefined) && (
+                                                            <span
+                                                                style={{
+                                                                    background: '#dbeafe',
+                                                                    color: '#1d4ed8',
+                                                                    borderRadius: '999px',
+                                                                    padding: '3px 8px'
+                                                                }}
+                                                            >
+                                                                {option.bundles_count ?? option.bundle_count} products
+                                                            </span>
+                                                        )}
+
+                                                        {option.starting_price !== undefined && (
+                                                            <span
+                                                                style={{
+                                                                    background: '#dcfce7',
+                                                                    color: '#15803d',
+                                                                    borderRadius: '999px',
+                                                                    padding: '3px 8px'
+                                                                }}
+                                                            >
+                                                                From {option.starting_price} {option.currency || ''}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            valueTemplate={(option: any) => {
+                                                if (!option) return 'Select ManshorPay service';
+
+                                                return (
+                                                    <div className="flex align-items-center gap-2">
+                                                        <i className="pi pi-sitemap" style={{ color: '#2563eb' }} />
+                                                        <span>{getManshorPayServiceLabel(option)}</span>
+                                                    </div>
+                                                );
+                                            }}
+                                        />
+                                    </div>
+
+                                    <div className="field col-12 md:col-6">
+                                        <label
+                                            htmlFor="manshor_product"
+                                            style={{
+                                                fontWeight: 'bold',
+                                                marginBottom: '8px',
+                                                display: 'block'
+                                            }}
+                                        >
+                                            ManshorPay Product <span className="text-red-500">*</span>
+                                        </label>
+
+                                        <Dropdown
+                                            id="manshor_product"
+                                            value={selectedProviderBundle}
+                                            options={manshorPayProducts}
+                                            onChange={(e) => {
+                                                console.log('Selected ManshorPay product:', e.value);
+                                                setSelectedProviderBundle(e.value);
+                                            }}
+                                            disabled={!selectedManshorPayService || manshorPayProductsLoading}
+                                            optionLabel="title"
+                                            filter
+                                            filterBy="title,name,operator,category,type,validity"
+                                            filterPlaceholder="Search product"
+                                            showFilterClear
+                                            placeholder={
+                                                selectedManshorPayService
+                                                    ? 'Select ManshorPay product'
+                                                    : 'Select service first'
+                                            }
+                                            className="w-full"
+                                            panelClassName={isRTL() ? 'manshorpay-dropdown-panel manshorpay-dropdown-panel-rtl' : 'manshorpay-dropdown-panel'}
+                                            scrollHeight="320px"
+                                            emptyMessage="No ManshorPay products found"
+                                            itemTemplate={(option: any) => (
+                                                <div className="flex flex-column gap-2 p-2">
+                                                    <div
+                                                        className="flex justify-content-between align-items-start gap-2"
+                                                    >
+                                                        <div className="font-semibold">
+                                                            {getManshorPayProductTitle(option)}
+                                                        </div>
+
+                                                        <span
+                                                            style={{
+                                                                fontSize: '0.72rem',
+                                                                color: '#475569',
+                                                                background: '#f1f5f9',
+                                                                borderRadius: '999px',
+                                                                padding: '3px 8px',
+                                                                whiteSpace: 'nowrap'
+                                                            }}
+                                                        >
+                                                            #{option.id}
+                                                        </span>
+                                                    </div>
+
+                                                    <div className="flex flex-wrap gap-2 text-xs">
+                                                        {option.operator && (
+                                                            <span
+                                                                style={{
+                                                                    background: '#dbeafe',
+                                                                    color: '#1d4ed8',
+                                                                    borderRadius: '999px',
+                                                                    padding: '3px 8px'
+                                                                }}
+                                                            >
+                                                                {typeof option.operator === 'object'
+                                                                    ? option.operator?.name
+                                                                    : option.operator}
+                                                            </span>
+                                                        )}
+
+                                                        {option.category && (
+                                                            <span
+                                                                style={{
+                                                                    background: '#ede9fe',
+                                                                    color: '#6d28d9',
+                                                                    borderRadius: '999px',
+                                                                    padding: '3px 8px'
+                                                                }}
+                                                            >
+                                                                {typeof option.category === 'object'
+                                                                    ? option.category?.name
+                                                                    : option.category}
+                                                            </span>
+                                                        )}
+
+                                                        {option.validity && (
+                                                            <span
+                                                                style={{
+                                                                    background: '#ffedd5',
+                                                                    color: '#c2410c',
+                                                                    borderRadius: '999px',
+                                                                    padding: '3px 8px'
+                                                                }}
+                                                            >
+                                                                {option.validity}
+                                                            </span>
+                                                        )}
+
+                                                        {option.price !== undefined && option.price !== null && (
+                                                            <span
+                                                                style={{
+                                                                    background: '#dcfce7',
+                                                                    color: '#15803d',
+                                                                    borderRadius: '999px',
+                                                                    padding: '3px 8px'
+                                                                }}
+                                                            >
+                                                                Provider: {option.price} {option.currency || ''}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            valueTemplate={(option: any) => {
+                                                if (!option) {
+                                                    return selectedManshorPayService
+                                                        ? 'Select ManshorPay product'
+                                                        : 'Select service first';
+                                                }
+
+                                                return (
+                                                    <div className="flex justify-content-between align-items-center gap-2">
+                                                        <div className="flex flex-column">
+                                                            <span className="font-semibold">
+                                                                {getManshorPayProductTitle(option)}
+                                                            </span>
+
+                                                            <span
+                                                                style={{
+                                                                    fontSize: '0.75rem',
+                                                                    color: '#64748b'
+                                                                }}
+                                                            >
+                                                                {typeof option.operator === 'object'
+                                                                    ? option.operator?.name
+                                                                    : option.operator || ''}
+                                                                {option.price !== undefined && option.price !== null
+                                                                    ? ` • ${option.price} ${option.currency || ''}`
+                                                                    : ''}
+                                                            </span>
+                                                        </div>
+
+                                                        <i className="pi pi-check-circle" style={{ color: '#16a34a' }} />
+                                                    </div>
+                                                );
+                                            }}
+                                        />
+                                    </div>
+
+                                    {selectedProviderBundle && (
+                                        <div className="field col-12 mb-0">
+                                            <div
+                                                style={{
+                                                    border: '1px solid #bbf7d0',
+                                                    background: '#f0fdf4',
+                                                    borderRadius: '12px',
+                                                    padding: '14px'
+                                                }}
+                                            >
+                                                <div className="flex flex-column md:flex-row md:align-items-center md:justify-content-between gap-3">
+                                                    <div className="flex align-items-center gap-3">
+                                                        <div
+                                                            className="flex align-items-center justify-content-center"
+                                                            style={{
+                                                                width: '38px',
+                                                                height: '38px',
+                                                                borderRadius: '50%',
+                                                                background: '#22c55e',
+                                                                color: '#ffffff',
+                                                                flexShrink: 0
+                                                            }}
+                                                        >
+                                                            <i className="pi pi-check" />
+                                                        </div>
+
+                                                        <div>
+                                                            <div
+                                                                style={{
+                                                                    fontSize: '0.72rem',
+                                                                    color: '#15803d',
+                                                                    fontWeight: 600,
+                                                                    marginBottom: '2px'
+                                                                }}
+                                                            >
+                                                                Selected provider product
+                                                            </div>
+
+                                                            <div style={{ fontWeight: 700 }}>
+                                                                {getManshorPayProductTitle(selectedProviderBundle)}
+                                                            </div>
+
+                                                            <div
+                                                                style={{
+                                                                    fontSize: '0.78rem',
+                                                                    color: '#64748b',
+                                                                    marginTop: '3px'
+                                                                }}
+                                                            >
+                                                                {typeof (selectedProviderBundle as any).operator === 'object'
+                                                                    ? (selectedProviderBundle as any).operator?.name
+                                                                    : (selectedProviderBundle as any).operator || ''}
+                                                                {(selectedProviderBundle as any).validity
+                                                                    ? ` • ${(selectedProviderBundle as any).validity}`
+                                                                    : ''}
+                                                                {` • Product #${(selectedProviderBundle as any).id}`}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div
+                                                        style={{
+                                                            minWidth: '190px',
+                                                            background: '#ffffff',
+                                                            border: '1px solid #dcfce7',
+                                                            borderRadius: '10px',
+                                                            padding: '10px 12px'
+                                                        }}
+                                                    >
+                                                        <div
+                                                            style={{
+                                                                fontSize: '0.72rem',
+                                                                color: '#64748b'
+                                                            }}
+                                                        >
+                                                            ManshorPay provider price
+                                                        </div>
+
+                                                        <div
+                                                            style={{
+                                                                fontSize: '1rem',
+                                                                fontWeight: 700,
+                                                                marginTop: '2px'
+                                                            }}
+                                                        >
+                                                            {(selectedProviderBundle as any).price ?? '-'}{' '}
+                                                            {(selectedProviderBundle as any).currency || ''}
+                                                        </div>
+
+                                                        <div
+                                                            style={{
+                                                                fontSize: '0.68rem',
+                                                                color: '#94a3b8',
+                                                                marginTop: '2px'
+                                                            }}
+                                                        >
+                                                            Informational only — local Waslat prices stay unchanged.
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                             {/* INAX - locally categorized from one provider response */}
+                             {selectedProvider?.code === 'inax' && (
+                                 <div className="grid formgrid p-fluid" style={{ margin: '0 0 1rem 0', padding: '18px', border: '1px solid #dbeafe', borderRadius: '14px', background: '#f8fbff' }}>
+                                     <div className="col-12"><strong>INAX Product Binding</strong><div className="text-sm text-gray-500 mt-1">Filter the loaded catalog locally by category, company, and SIM type.</div></div>
+                                     {inaxLoading && <div className="col-12"><ProgressBar mode="indeterminate" style={{ height: '4px' }} /></div>}
+                                     <div className="field col-12 md:col-4">
+                                         <label>Category</label>
+                                         <Dropdown value={selectedInaxCategory} options={inaxCategories.map((v) => ({ label: v, value: v }))} onChange={(e) => { setSelectedInaxCategory(e.value); setSelectedInaxOperator(null); setSelectedInaxSimType(null); setSelectedProviderBundle(null); }} filter showClear placeholder="All categories" className="w-full" />
+                                     </div>
+                                     <div className="field col-12 md:col-4">
+                                         <label>Company / Operator</label>
+                                         <Dropdown value={selectedInaxOperator} options={inaxOperators.map((v) => ({ label: v, value: v }))} onChange={(e) => { setSelectedInaxOperator(e.value); setSelectedInaxSimType(null); setSelectedProviderBundle(null); }} filter showClear placeholder="All companies" className="w-full" />
+                                     </div>
+                                     <div className="field col-12 md:col-4">
+                                         <label>SIM Type</label>
+                                         <Dropdown value={selectedInaxSimType} options={inaxSimTypes.map((v) => ({ label: v, value: v }))} onChange={(e) => { setSelectedInaxSimType(e.value); setSelectedProviderBundle(null); }} showClear placeholder="All SIM types" className="w-full" />
+                                     </div>
+                                     <div className="field col-12">
+                                         <label>Provider Product ({filteredInaxProducts.length})</label>
+                                         <Dropdown
+                                             value={filteredInaxProducts.find((p: any) => String(p.id) === String((selectedProviderBundle as any)?.id) && String(p.table_id || p.provider_table_id) === String((selectedProviderBundle as any)?.table_id || (selectedProviderBundle as any)?.provider_table_id)) || selectedProviderBundle}
+                                             options={filteredInaxProducts}
+                                             onChange={(e) => setSelectedProviderBundle(e.value)}
+                                             optionLabel="title"
+                                             filter filterBy="title,name,desc,operator,sim_type"
+                                             filterPlaceholder="Search product or package"
+                                             placeholder="Select INAX product"
+                                             dataKey="table_id"
+                                             scrollHeight="350px"
+                                             emptyMessage="No products found"
+                                             className="w-full"
+                                             itemTemplate={(p: any) => <div className="flex flex-column gap-1 p-2">
+                                                 <strong>{p.title || p.name}</strong>
+                                                 <span className="text-sm text-gray-600">{p.operator || p.meta?.operator} · {p.sim_type || p.meta?.sim_type} · {p.validity || '-'} · {p.meta?.volume ? `${p.meta.volume} ${p.meta.unit || ''}` : ''}</span>
+                                                 <span className="text-sm text-blue-700">Price: {p.price ?? '-'} {p.currency || 'IRT'} · Total: {p.tprice ?? '-'} {p.currency || 'IRT'} · Table #{p.table_id || p.provider_table_id}</span>
+                                             </div>}
+                                             valueTemplate={(p: any) => p ? <span>{inaxProductLabel(p)}</span> : <span>Select INAX product</span>}
+                                         />
+                                     </div>
+                                     {selectedProviderBundle && <div className="col-12">
+                                         <div className="p-3 border-round-lg" style={{ background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                                             <strong>{(selectedProviderBundle as any).title || (selectedProviderBundle as any).name}</strong>
+                                             <div className="text-sm mt-2">{(selectedProviderBundle as any).desc || ''}</div>
+                                             <div className="flex flex-wrap gap-3 text-sm mt-2">
+                                                 <span>Operator: {(selectedProviderBundle as any).operator || (selectedProviderBundle as any).meta?.operator || '-'}</span>
+                                                 <span>SIM: {(selectedProviderBundle as any).sim_type || (selectedProviderBundle as any).meta?.sim_type || '-'}</span>
+                                                 <span>Validity: {(selectedProviderBundle as any).validity || '-'}</span>
+                                                 <span>Volume: {(selectedProviderBundle as any).meta?.volume || '-'} {(selectedProviderBundle as any).meta?.unit || ''}</span>
+                                                 <span>Price: {(selectedProviderBundle as any).price ?? '-'} {(selectedProviderBundle as any).currency || 'IRT'}</span>
+                                                 <strong>Total price: {(selectedProviderBundle as any).tprice ?? '-'} {(selectedProviderBundle as any).currency || 'IRT'}</strong>
+                                             </div>
+                                             <div className="text-xs text-gray-500 mt-2">INAX prices are informational; Waslat bundle pricing is configured separately.</div>
+                                         </div>
+                                     </div>}
+                                 </div>
+                             )}
+
+                            {/* PAYSTORE SECTION - Show operator list and products based on op_firm */}
+                            {isPaystore && (
+                                <div className="grid formgrid p-fluid">
+                                    {/* Operator Group Dropdown */}
+                                    <div className="field col-12 md:col-6">
+                                        <label htmlFor="operator_group" style={{ fontWeight: 'bold', marginBottom: '8px', display: 'block' }}>
+                                            {t('OPERATOR_GROUP')}
+                                        </label>
+                                        <Dropdown
+                                            id="operator_group"
+                                            value={selectedPaystoreGroup}
+                                            options={operatorGroups}
+                                            onChange={(e) => {
+                                                setSelectedPaystoreGroup(e.value);
+                                                setSelectedPaystoreOperator(null);
+                                                setSelectedProviderBundle(null);
+                                            }}
+                                            optionLabel="op_firm"
+                                            placeholder={t('SELECT_OPERATOR_GROUP')}
+                                            className="w-full"
+                                            itemTemplate={(option: PaystoreGroup) => (
+                                                <div className="flex justify-content-between align-items-center p-2">
+                                                    <span className="font-semibold">{option.op_firm}</span>
+                                                    <span className="text-xs text-gray-500">Products: {option.product_count}</span>
+                                                </div>
+                                            )}
+                                            valueTemplate={(option: PaystoreGroup) => {
+                                                if (!option) return t('SELECT_OPERATOR_GROUP');
+                                                return (
+                                                    <div className="flex justify-content-between align-items-center">
+                                                        <span>{option.op_firm}</span>
+                                                        <span className="text-xs text-gray-500">({option.product_count} products)</span>
+                                                    </div>
+                                                );
+                                            }}
+                                        />
+                                    </div>
+
+                                    {/* Operator Dropdown */}
+                                    {selectedPaystoreGroup && (
+                                        <div className="field col-12 md:col-6">
+                                            <label htmlFor="operator" style={{ fontWeight: 'bold', marginBottom: '8px', display: 'block' }}>
+                                                {t('OPERATOR')}
+                                            </label>
+                                            <Dropdown
+                                                id="operator"
+                                                value={selectedPaystoreOperator}
+                                                options={selectedPaystoreGroup.operators}
+                                                onChange={(e) => {
+                                                    setSelectedPaystoreOperator(e.value);
+                                                }}
+                                                optionLabel="code"
+                                                placeholder={t('SELECT_OPERATOR')}
+                                                className="w-full"
+                                                itemTemplate={(option: PaystoreOperator) => (
+                                                    <div className="flex justify-content-between align-items-center p-2">
+                                                        <span>{option.code}</span>
+                                                        <span className="text-xs text-gray-500">Products: {option.product_count}</span>
+                                                    </div>
+                                                )}
+                                                valueTemplate={(option: PaystoreOperator) => {
+                                                    if (!option) return t('SELECT_OPERATOR');
+                                                    return (
+                                                        <div className="flex justify-content-between align-items-center">
+                                                            <span>{option.code}</span>
+                                                            <span className="text-xs text-gray-500">({option.product_count} products)</span>
+                                                        </div>
+                                                    );
+                                                }}
+                                            />
+                                        </div>
+                                    )}
+
+                                    {/* Info Display */}
+                                    {selectedPaystoreGroup && (
+                                        <div className="field col-12">
+                                            <div className="text-sm text-gray-600 p-2 bg-blue-50 rounded">
+                                                <strong>{selectedPaystoreGroup.op_firm}</strong> - Total Products: {selectedPaystoreGroup.product_count}
+                                                {selectedPaystoreOperator && (
+                                                    <span className="ml-3">
+                                                        | Selected Operator: <strong>{selectedPaystoreOperator.code}</strong>
+                                                        ({selectedPaystoreOperator.product_count} products)
+                                                    </span>
+                                                )}
+                                                {selectedOpFirmFromRedux && (
+                                                    <span className="ml-3 text-green-600">
+                                                        | ✅ Products loaded for: <strong>{selectedOpFirmFromRedux}</strong> ({products?.length || 0} products)
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Products Dropdown - Shows products based on op_firm */}
+                                    {selectedPaystoreGroup && (
+                                        <div className="field col-12">
+                                            <label htmlFor="product_select" style={{ fontWeight: 'bold', marginBottom: '8px', display: 'block' }}>
+                                                {t('PRODUCTS')}
+                                            </label>
+                                            <Dropdown
+                                                id="product_select"
+                                                value={selectedProviderBundle}
+                                                options={products}
+                                                onChange={(e) => {
+                                                    console.log('Selected product:', e.value);
+                                                    setSelectedProviderBundle(e.value);
+                                                }}
+                                                optionLabel="title"
+                                                filter
+                                                filterBy="title,operator,type"
+                                                filterPlaceholder={t('SEARCH_PRODUCT')}
+                                                showFilterClear
+                                                placeholder={t('SELECT_PRODUCT')}
+                                                className="w-full"
+                                                panelClassName="w-full"
+                                                emptyMessage="No products found for this operator"
+                                                itemTemplate={(option: any) => (
+                                                    <div className="flex flex-col p-2 gap-2">
+                                                        <div className="font-semibold text-sm">{option.title || option.name || option.package_name || 'N/A'}</div>
+                                                        <div className="flex flex-wrap gap-2 text-xs text-gray-600">
+                                                            {option.operator && <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">{option.operator}</span>}
+                                                            {option.price && <span className="bg-red-100 text-red-800 px-2 py-1 rounded">Price: {option.price}</span>}
+                                                            {option.validity_days && <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">Validity: {option.validity_days} days</span>}
+                                                            {option.type && <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded">Type: {option.type}</span>}
+                                                            {option.amount && <span className="bg-green-100 text-green-800 px-2 py-1 rounded">Amount: {option.amount}</span>}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                valueTemplate={(option: any) => {
+                                                    if (!option) return t('SELECT_PRODUCT');
+                                                    return (
+                                                        <div className="flex flex-col gap-1">
+                                                            <span className="font-semibold text-sm">
+                                                                {option.title || option.name || option.package_name || 'N/A'}
+                                                            </span>
+                                                            <span className="text-xs text-gray-600">
+                                                                {option.operator} - {option.price}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                }}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* BUNDLE DROPDOWN - for regular providers */}
+                            {selectedProvider &&
+                                selectedProvider.code !== 'mzr' &&
+                                selectedProvider.code !== 'paystore' &&
+                                selectedProvider.code !== 'manshorpay' &&
+                                selectedProvider.code !== 'inax' &&
+                                selectedCapability && (
                                 <div className="grid formgrid p-fluid">
                                     <div className="field col-12">
                                         <label htmlFor="bundle_select" style={{ fontWeight: 'bold', marginBottom: '8px', display: 'block' }}>
@@ -1354,6 +2782,7 @@ const BundlePage = () => {
                                             value={selectedProviderBundle}
                                             options={rawInternets}
                                             onChange={(e) => {
+                                                console.log('Selected bundle:', e.value);
                                                 setSelectedProviderBundle(e.value);
                                             }}
                                             optionLabel="name"
@@ -1364,7 +2793,8 @@ const BundlePage = () => {
                                             placeholder={t('SEARCH_BUNDLE')}
                                             className="w-full"
                                             panelClassName="w-full"
-                                            itemTemplate={(option) => (
+                                            emptyMessage="No bundles found"
+                                            itemTemplate={(option: any) => (
                                                 <div className="flex flex-col p-2 gap-2">
                                                     <div className="font-semibold text-sm">{option.name || option.title}</div>
                                                     <div className="flex flex-wrap gap-2 text-xs text-gray-600">
@@ -1374,46 +2804,15 @@ const BundlePage = () => {
                                                     </div>
                                                 </div>
                                             )}
-                                            valueTemplate={(option) => {
+                                            valueTemplate={(option: any) => {
                                                 if (!option) return t('SEARCH_BUNDLE');
-
                                                 return (
-                                                    <div className="flex flex-col gap-1 justify-center items-center">
+                                                    <div className="flex flex-col gap-1">
                                                         <span className="font-semibold text-sm">
                                                             {option.name || option.title}
                                                         </span>
-
                                                         <span className="text-xs text-gray-600">
-                                                            {option.operator}
-                                                        </span>
-
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.currency}
-                                                        </span>
-
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.category}
-                                                        </span>
-
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.validity}
-                                                        </span>
-
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.price}
-                                                        </span>
-
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.voulume}
-                                                        </span>
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.unit}
-                                                        </span>
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.sim_type}
-                                                        </span>
-                                                        <span className="text-xs text-gray-600">
-                                                            {option.internet_type}
+                                                            {option.operator} - {option.price}
                                                         </span>
                                                     </div>
                                                 );
@@ -1439,6 +2838,8 @@ const BundlePage = () => {
                             )}
                         </div>
                     </Dialog>
+
+
 
                     <Dialog visible={deleteServiceDialog} style={{ width: '450px' }} header={t('TABLE.GENERAL.CONFIRM')} modal footer={deleteCompanyDialogFooter} onHide={hideDeleteServiceDialog}>
                         <div className="flex align-items-center justify-content-center">
